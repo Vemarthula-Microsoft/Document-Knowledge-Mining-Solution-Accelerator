@@ -1,16 +1,26 @@
-name: Validate Deployment
+name: Deploy-Test-Cleanup Pipeline
 on:
   push:
     branches:
       - main # Adjust this to the branch you want to trigger the deployment on
       - dev
       - demo
+      - deploy-and-test
   schedule:
     - cron: "0 10,22 * * *" # Runs at 10:00 AM and 10:00 PM GMT
+
+env:
+  GPT_CAPACITY: 250
+  TEXT_EMBEDDING_CAPACITY: 200
 
 jobs:
   deploy:
     runs-on: windows-latest # Use a Windows runner for PowerShell scripts
+    outputs:
+      RESOURCE_GROUP_NAME: ${{ steps.run_deployment_script.outputs.RESOURCE_GROUP_NAME }}
+      KUBERNETES_RESOURCE_GROUP_NAME: ${{ steps.run_deployment_script.outputs.KUBERNETES_RESOURCE_GROUP_NAME }}
+      SOLUTION_PREFIX: ${{ steps.run_deployment_script.outputs.SOLUTION_PREFIX }}
+      WEBAPP_URL: ${{ steps.get_webapp_url.outputs.WEBAPP_URL }}
 
     steps:
       - name: Checkout Code
@@ -30,7 +40,7 @@ jobs:
           Move-Item -Path ./kubectl.exe -Destination "C:\kubectl.exe"
           [Environment]::SetEnvironmentVariable('PATH', $env:PATH + ';C:\', [System.EnvironmentVariableTarget]::Machine)
 
-        # Install Helm (Windows method)
+      # Install Helm (Windows method)
       - name: Install Helm
         shell: pwsh
         run: |
@@ -84,8 +94,8 @@ jobs:
           AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
           AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
           AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
-          GPT_MIN_CAPACITY: "10"
-          TEXT_EMBEDDING_MIN_CAPACITY: "10"
+          GPT_MIN_CAPACITY: ${{ env.GPT_CAPACITY }}
+          TEXT_EMBEDDING_MIN_CAPACITY: ${{ env.TEXT_EMBEDDING_CAPACITY }}
           AZURE_REGIONS: "${{ vars.AZURE_REGIONS }}"
 
       # Send Notification on Quota Failure
@@ -98,7 +108,7 @@ jobs:
           # Construct the email body
           $EMAIL_BODY = @"
           {
-            "body": "<p>Dear Team,</p><p>The quota check has failed, and the pipeline cannot proceed.</p><p><strong>Build URL:</strong> $RUN_URL</p><p>Please take necessary action.</p><p>Best regards,<br>Your Automation Team</p>"
+            "body": "<p>Dear Team,</p><p>The quota check has failed, and the pipeline cannot proceed.</p><p><strong>Build URL:</strong> <a href='$RUN_URL'>$RUN_URL</a></p><p>Please take necessary action.</p><p>Best regards,<br>Your Automation Team</p>"
           }
           "@
 
@@ -126,6 +136,7 @@ jobs:
           echo "Generated ENVIRONMENT_NAME: ${UNIQUE_ENV_NAME}"
 
       - name: Run Deployment Script with Input
+        id: run_deployment_script
         shell: pwsh
         run: |
           cd Deployment
@@ -142,24 +153,112 @@ jobs:
           $input | pwsh ./resourcedeployment.ps1
           echo "Resource Group Name is ${{ env.rg_name }}"
           echo "Kubernetes resource group are ${{ env.krg_name }}"
+          echo "RESOURCE_GROUP_NAME=${{ env.rg_name }}" >> $GITHUB_OUTPUT
+          echo "KUBERNETES_RESOURCE_GROUP_NAME=${{ env.krg_name }}" >> $GITHUB_OUTPUT
+          echo "SOLUTION_PREFIX=${{ env.SOLUTION_PREFIX }}" >> $GITHUB_OUTPUT
         env:
           AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
           AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
           AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
           AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+
+      - name: Extract Web App URL and Increase TPM
+        id: get_webapp_url
+        shell: bash
+        run: |
+          if az account show &> /dev/null; then
+            echo "Azure CLI is authenticated."
+          else
+            az login --service-principal --username ${{ secrets.AZURE_CLIENT_ID }} --password ${{ secrets.AZURE_CLIENT_SECRET }} --tenant ${{ secrets.AZURE_TENANT_ID }}
+          fi
+          az account set --subscription ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+          # Get the Web App URL
+          public_ip_name=(az network public-ip list --resource-group ${{ env.rg_name }} --query "[?contains(name, 'kubernetes-')].name" -o tsv)
+          fqdn=(az network public-ip show --resource-group ${{ env.rg_name }} --name $public_ip_name --query "dnsSettings.fqdn" -o tsv)
+          if [ -n "$fqdn" ]; then
+            echo "WEBAPP_URL="https://$fqdn" >> $GITHUB_OUTPUT
+            echo "Web App URL is $fqdn"
+          else
+            echo "Failed to retrieve Web App URL."
+            exit 1
+          fi
+
+          # Increase the TPM for the Azure OpenAI models
+          solutionPrefix="${{ env.SOLUTION_PREFIX }}"
+          openai_name="oai-$solutionPrefix"
+          openai_deployment_url="/subscriptions/${{ secrets.AZURE_SUBSCRIPTION_ID }}/resourceGroups/${{ env.rg_name }}/providers/Microsoft.CognitiveServices/accounts/$openai_name/deployments/gpt-4o-mini?api-version=2023-05-01"
+          az rest -m put -u "$openai_deployment_url" -b "{'sku':{'name':'Standard','capacity':${{ env.GPT_CAPACITY }}},'properties': {'model': {'format': 'OpenAI','name': 'gpt-4o-mini','version': '2024-07-18'}}}"
+          if [ $? -ne 0 ]; then
+            echo "Failed to increase TPM for GPT deployment."
+            exit 1
+          else
+            echo "Successfully increased TPM for GPT deployment."
+          fi
+          az rest -m put -u "$openai_deployment_url" -b "{'sku':{'name':'Standard','capacity': ${{ env.TEXT_EMBEDDING_CAPACITY }}},'properties': {'model': {'format': 'OpenAI','name': 'text-embedding-large','version': '1'}}}"
+          if [ $? -ne 0 ]; then
+            echo "Failed to increase TPM for Text Embedding deployment."
+            exit 1
+          else
+            echo "Successfully increased TPM for Text Embedding deployment."
+          fi
           
+      - name: Run Post Deployment Script
+        shell: pwsh
+        run: |
+          cd Deployment
+          .\uploadfiles.ps1 -EndpointUrl "${{ steps.get_webapp_url.outputs.WEBAPP_URL }}"
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "❌ Post deployment script failed."
+            exit 1
+          } else {
+            Write-Host "✅ Post deployment script completed successfully."
+          }
+
+      - name: Logout from Azure
+        shell: pwsh
+        run: |
+          az logout
+          Write-Host "Logged out from Azure successfully."
+
+
+  e2e-test:
+    needs: deploy
+    uses: ./.github/workflows/test-automation.yml
+    with:
+      DKM_URL: ${{ needs.deploy.outputs.WEBAPP_URL }}
+    secrets: inherit
+
+
+  cleanup-deployment:
+    needs: [deploy, e2e-test]
+    runs-on: windows-latest
+    if: always() && needs.deploy.outputs.RESOURCE_GROUP_NAME != ''
+    env:
+      RESOURCE_GROUP_NAME: ${{ needs.deploy.outputs.RESOURCE_GROUP_NAME }}
+      KUBERNETES_RESOURCE_GROUP_NAME: ${{ needs.deploy.outputs.KUBERNETES_RESOURCE_GROUP_NAME }}
+      SOLUTION_PREFIX: ${{ needs.deploy.outputs.SOLUTION_PREFIX }}
+
+    steps:
+
+      - name: Install Azure CLI
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri https://aka.ms/installazurecliwindows -OutFile AzureCLI.msi
+          Start-Process msiexec.exe -ArgumentList '/I AzureCLI.msi /quiet' -Wait
+
+      - name: Login to Azure
+        shell: pwsh
+        run: |
+          az login --service-principal --username ${{ secrets.AZURE_CLIENT_ID }} --password ${{ secrets.AZURE_CLIENT_SECRET }} --tenant ${{ secrets.AZURE_TENANT_ID }}
+          az account set --subscription "${{ secrets.AZURE_SUBSCRIPTION_ID }}"
+
       - name: Cleanup Resource Group
         if: always() # Ensures this step runs even if the deployment fails
         shell: pwsh
         run: |
-          az login --service-principal --username ${{ secrets.AZURE_CLIENT_ID }} --password ${{ secrets.AZURE_CLIENT_SECRET }} --tenant ${{ secrets.AZURE_TENANT_ID }}
-          az group delete --name ${{ env.rg_name }} --yes --no-wait
-          az group delete --name ${{ env.krg_name }} --yes --no-wait
-        env:
-          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          az group delete --name ${{ env.RESOURCE_GROUP_NAME }} --yes --no-wait
+          az group delete --name ${{ env.KUBERNETES_RESOURCE_GROUP_NAME }} --yes --no-wait
 
       - name: Wait for Resource Deletion to Complete
         shell: pwsh
@@ -169,9 +268,9 @@ jobs:
           $sleepIntervals = @(700, 200, 200)
 
           while ($retries -lt $maxRetries) {
-            $rgStatus = az group exists --name ${{ env.rg_name }}
-            $krgStatus = az group exists --name ${{ env.krg_name }}
-            
+            $rgStatus = az group exists --name ${{ env.RESOURCE_GROUP_NAME }}
+            $krgStatus = az group exists --name ${{ env.KUBERNETES_RESOURCE_GROUP_NAME }}
+
 
             # if (-not $rgStatus -and -not $krgStatus) {
             #   Write-Host "Both resource groups deleted successfully."
@@ -199,10 +298,10 @@ jobs:
           # Set variables using GitHub Actions environment values
           $solutionPrefix = "${{ env.SOLUTION_PREFIX }}"
           $subscriptionId = "${{ secrets.AZURE_SUBSCRIPTION_ID }}"
-          $resourceGroupName = "${{ env.rg_name }}"
+          $resourceGroupName = "${{ env.RESOURCE_GROUP_NAME }}"
 
-          $openai_name = "openaiservice-$solutionPrefix"
-          $cognitiveservice_name = "cognitiveservice-$solutionPrefix"
+          $openai_name = "oai-$solutionPrefix"
+          $cognitiveservice_name = "di-$solutionPrefix"
 
           # Debug: Print resource names
           Write-Host "Purging OpenAI resource: $openai_name"
@@ -230,7 +329,7 @@ jobs:
               }
 
       - name: Send Notification on Failure
-        if: failure()
+        if: failure() || needs.deploy.result == 'failure'
         shell: pwsh
         run: |
           # Define the RUN_URL variable
@@ -251,3 +350,9 @@ jobs:
           } catch {
               Write-Output "Failed to send notification."
           }
+
+      - name: Logout from Azure
+        shell: pwsh
+        run: |
+          az logout
+          Write-Host "Logged out from Azure successfully."
