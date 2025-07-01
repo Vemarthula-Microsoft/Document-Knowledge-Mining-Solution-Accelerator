@@ -33,12 +33,18 @@ jobs:
           Start-Process msiexec.exe -ArgumentList '/I AzureCLI.msi /quiet' -Wait
 
       # Install kubectl (Windows method)
+      # - name: Install kubectl
+      #   shell: pwsh
+      #   run: |
+      #     Invoke-WebRequest -Uri https://dl.k8s.io/release/v1.28.0/bin/windows/amd64/kubectl.exe -OutFile kubectl.exe
+      #     Move-Item -Path ./kubectl.exe -Destination "C:\kubectl.exe"
+      #     [Environment]::SetEnvironmentVariable('PATH', $env:PATH + ';C:\', [System.EnvironmentVariableTarget]::Machine)
+
       - name: Install kubectl
         shell: pwsh
         run: |
-          Invoke-WebRequest -Uri https://dl.k8s.io/release/v1.28.0/bin/windows/amd64/kubectl.exe -OutFile kubectl.exe
-          Move-Item -Path ./kubectl.exe -Destination "C:\kubectl.exe"
-          [Environment]::SetEnvironmentVariable('PATH', $env:PATH + ';C:\', [System.EnvironmentVariableTarget]::Machine)
+          az aks install-cli
+          az extension add --name aks-preview
 
       # Install Helm (Windows method)
       - name: Install Helm
@@ -232,7 +238,7 @@ jobs:
 
 
   cleanup-deployment:
-    if: always() && needs.deploy.outputs.RESOURCE_GROUP_NAME != ''
+    if: always()
     needs: [deploy, e2e-test]
     runs-on: windows-latest
     env:
@@ -255,7 +261,7 @@ jobs:
           az account set --subscription "${{ secrets.AZURE_SUBSCRIPTION_ID }}"
 
       - name: Cleanup Resource Group
-        if: always() # Ensures this step runs even if the deployment fails
+        if: always() && needs.deploy.outputs.RESOURCE_GROUP_NAME != '' # Ensures this step runs even if the deployment fails
         shell: pwsh
         run: |
           az group delete --name ${{ env.RESOURCE_GROUP_NAME }} --yes --no-wait
