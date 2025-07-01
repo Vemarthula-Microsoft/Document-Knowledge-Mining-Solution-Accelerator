@@ -202,7 +202,7 @@ jobs:
             echo "Successfully increased TPM for GPT deployment."
           fi
           openai_embedding_deployment_url="/subscriptions/${{ secrets.AZURE_SUBSCRIPTION_ID }}/resourceGroups/${{ env.rg_name }}/providers/Microsoft.CognitiveServices/accounts/$openai_name/deployments/text-embedding-large?api-version=2023-05-01"
-          az rest -m put -u "$openai_embedding_deployment_url" -b "{'sku':{'name':'Standard','capacity': ${{ env.TEXT_EMBEDDING_CAPACITY }}},'properties': {'model': {'format': 'OpenAI','name': 'text-embedding-large','version': '1'}}}"
+          az rest -m put -u "$openai_embedding_deployment_url" -b "{'sku':{'name':'Standard','capacity': ${{ env.TEXT_EMBEDDING_CAPACITY }}},'properties': {'model': {'format': 'OpenAI','name': 'text-embedding-3-large','version': '1'}}}"
           if [ $? -ne 0 ]; then
             echo "Failed to increase TPM for Text Embedding deployment."
             exit 1
