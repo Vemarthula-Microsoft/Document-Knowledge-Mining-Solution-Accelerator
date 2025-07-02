@@ -999,17 +999,17 @@ try {
     # 2. Build and push the images to Azure Container Registry
     #  2-1. Build and push the AI Service container image to  Azure Container Registry
     #$acrAIServiceTag = "$($deploymentResult.AzContainerRegistryName).azurecr.io/$acrNamespace/aiservice"
-    docker build "../App/backend-api/." --no-cache -t $acrAIServiceTag
+    docker build "../App/backend-api/." --platform linux/amd64 --no-cache -t $acrAIServiceTag
     docker push $acrAIServiceTag
 
     #  2-2. Build and push the Kernel Memory Service container image to Azure Container Registry
     #$acrKernelMemoryTag = "$($deploymentResult.AzContainerRegistryName).azurecr.io/$acrNamespace/kernelmemory"
-    docker build "../App/kernel-memory/." --no-cache -t $acrKernelMemoryTag
+    docker build "../App/kernel-memory/." --platform linux/amd64 --no-cache -t $acrKernelMemoryTag
     docker push $acrKernelMemoryTag
 
     #  2-3. Build and push the Frontend App Service container image to Azure Container Registry
     #$acrFrontAppTag = "$($deploymentResult.AzContainerRegistryName).azurecr.io/$acrNamespace/frontapp"
-    docker build "../App/frontend-app/." --no-cache -t $acrFrontAppTag
+    docker build "../App/frontend-app/." --platform linux/amd64 --no-cache -t $acrFrontAppTag
     docker push $acrFrontAppTag
 
     #======================================================================================================================================================================
