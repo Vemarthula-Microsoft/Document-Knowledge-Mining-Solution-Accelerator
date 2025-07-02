@@ -58,15 +58,13 @@ jobs:
       # - name: Set Docker environment variables
       #   run: echo "DOCKER_BUILDKIT=1" >> $GITHUB_ENV
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-      
         # Set up Docker
       - name: Set up Docker
         uses: docker/setup-buildx-action@v3
-        # with:
-        #   driver: docker-container
-        #   install: true
+        with:
+          driver: docker
+          platforms: linux/amd64
+          install: true
 
       - name: Setup PowerShell
         shell: pwsh
